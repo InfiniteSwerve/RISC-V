@@ -66,6 +66,14 @@ class Func3(Enum):
     SRLI = SRAI = SRL = SRA = 0b101
     MISC = 0b000
 
+    # BRANCH
+    BEQ = 0b000
+    BNE = 0b001
+    BLT = 0b100
+    BGE = 0b101
+    BLTU = 0b110
+    BGEU = 0b111
+
     # SYSTEM
     # I-type
     # Doesn't do anything for us, but,
@@ -91,7 +99,8 @@ def ws(dat, addr):
 # Unpack always returns a tuple even if there's no other elements
 def r32(addr):
     addr -= 0x80000000
-    assert addr >= 0 and addr < len(memory)
+    if addr < 0 or addr > len(memory):
+        raise Exception("read out of bounds: %x" % addr)
     return struct.unpack("<I", memory[addr : addr + 4])[0]
 
 
@@ -108,6 +117,13 @@ def dump() -> None:
     print("".join(pp))
 
 
+def sign_extend(x, l):
+    if x >> (l - 1) == 1:
+        return (1 << l) - x
+    else:
+        return x
+
+
 def step() -> bool:
     # Instruction Fetch
     ins = r32(regfile[PC])
@@ -121,21 +137,38 @@ def step() -> bool:
         return (ins >> e) & ((1 << (s - e + 1)) - 1)
 
     bits = gibi(6, 0)
+    # print("%x %8x " % (regfile[PC], ins))
     opcode = Ops(bits)
-    print("%x %8x %s" % (regfile[PC], ins, opcode))
+    print("%x %8x %r" % (regfile[PC], ins, opcode))
     # print(hex(offset), rd)
-    # J-Type
     if opcode == Ops.JAL:
-        offset = (
-            gibi(31, 31) << 20
-            | gibi(19, 12) >> 12
-            | gibi(20, 20) >> 11
-            | gibi(30, 21) << 1
+        # J-Type
+        offset = sign_extend(
+            (
+                gibi(31, 31) << 20
+                | gibi(30, 21) << 1
+                | gibi(20, 20) << 11
+                | gibi(19, 12) << 12
+            ),
+            20,
         )
         # rd = destination register (why do they do everything backwards)
         rd = gibi(11, 7)
-        assert rd == 0
+        regfile[rd] = regfile[PC] + 4
         regfile[PC] += offset
+        return True
+
+    elif opcode == Ops.JALR:
+        # I-type
+        rd = gibi(11, 7)
+        func3 = gibi(14, 12)
+        rs1 = gibi(19, 15)
+        offset = sign_extend(gibi(31, 20), 12)
+        # register of the instruction following the jump is written to register rd.
+        # The increment is because each instruction if 4 bytes long
+        regfile[rd] += 4
+        # This does not look like what we're supposed to do at all
+        regfile[PC] = regfile[rs1] + offset
         return True
 
     elif opcode == Ops.IMM:
@@ -150,31 +183,56 @@ def step() -> bool:
         # print(rd, rs1, func3, imm)
         if func3 == Func3.ADDI:
             regfile[rd] = regfile[rs1] + imm
-
         elif func3 == Func3.SLLI:
-            regfile[rd] = regfile[rs1] >> gibi(24, 20)
+            regfile[rd] = regfile[rs1] << imm
         elif func3 == Func3.SRLI:
-            regfile[rd] = regfile[rs1] << gibi(24, 20)
+            regfile[rd] = regfile[rs1] >> imm
 
         else:
             raise Exception("write %r" % func3)
 
+    elif opcode == Ops.OP:
+        # R-type
+        rd = gibi(11, 7)
+        rs1 = gibi(19, 15)
+        rs2 = gibi(24, 20)
+        func7 = gibi(31, 25)
+        func3 = Func3(gibi(14, 12))
+
+        if func3 == Func3.ADD:
+            regfile[rd] = regfile[rs1] + regfile[rs2]
+
     elif opcode == Ops.AUIPC:
         # J-type
         rd = gibi(11, 7)
-        uimm = (
-            gibi(31, 31) << 20
-            | gibi(19, 12) >> 12
-            | gibi(20, 20) >> 11
-            | gibi(30, 21) << 1
-        ) << 12
-        print(rd, uimm)
-        regfile[rd] = uimm
+        uimm = gibi(31, 20)
+        regfile[rd] = regfile[PC] + uimm
+
+    elif opcode == Ops.BRANCH:
+        # B-type
+        func3 = Func3(gibi(14, 12))
+        rs1 = gibi(19, 15)
+        rs2 = gibi(24, 20)
+        imm = sign_extend(
+            gibi(11, 8) << 1
+            | gibi(30, 25) << 6
+            | gibi(7, 7) << 11
+            | gibi(31, 31) << 12,
+            12,
+        )
+
+        print(func3)
+        if func3 == Func3.BNE:
+            if regfile[rs1] != sign_extend(regfile[rs2], 12) << 1:
+                regfile[PC] += imm
+            else:
+                regfile[PC] += 4
 
     elif opcode == Ops.SYSTEM:
         pass
 
     else:
+        dump()
         raise Exception("write %r" % opcode)
 
     regfile[PC] += 4
