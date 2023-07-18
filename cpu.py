@@ -74,6 +74,11 @@ class Func3(Enum):
     BLTU = 0b110
     BGEU = 0b111
 
+    # STORE
+    SB = 0b000
+    SH = 0b001
+    SW = 0b010
+
     # SYSTEM
     # I-type
     # Doesn't do anything for us, but,
@@ -86,11 +91,14 @@ class Func3(Enum):
 memory = b"\x00" * 0x10000
 
 
+# Write to mem function
 def ws(dat, addr):
     global memory
     addr -= 0x80000000
-    assert addr >= 0 and addr < len(memory)
+    if addr < 0 or addr > len(memory):
+        raise Exception("read out of bounds: %x" % addr)
     # won't this increase total memory size over time?
+    # Nope, because the lower index of the upper slice accounts for that
     memory = memory[:addr] + dat + memory[addr + len(dat) :]
 
 
@@ -117,11 +125,11 @@ def dump() -> None:
     print("".join(pp))
 
 
+# This sign_extend only puts 1 extra bit at the front, but we need like, way more
 def sign_extend(x, l):
-    if x >> (l - 1) == 1:
-        return (1 << l) - x
-    else:
-        return x
+    if x & (1 << (l - 1)):
+        x |= -1 << l
+    return x
 
 
 def step() -> bool:
@@ -155,13 +163,14 @@ def step() -> bool:
         # rd = destination register (why do they do everything backwards)
         rd = gibi(11, 7)
         regfile[rd] = regfile[PC] + 4
+        print(hex(offset))
         regfile[PC] += offset
         return True
 
     elif opcode == Ops.JALR:
         # I-type
         rd = gibi(11, 7)
-        func3 = gibi(14, 12)
+        func3 = Func3(gibi(14, 12))
         rs1 = gibi(19, 15)
         offset = sign_extend(gibi(31, 20), 12)
         # register of the instruction following the jump is written to register rd.
@@ -179,10 +188,12 @@ def step() -> bool:
         # source register 1
         rs1 = gibi(19, 15)
         # imm means immediate value
-        imm = gibi(31, 20)
+        imm = sign_extend(gibi(31, 20), 12)
         # print(rd, rs1, func3, imm)
         if func3 == Func3.ADDI:
             regfile[rd] = regfile[rs1] + imm
+        elif func3 == Func3.ORI:
+            regfile[rd] = regfile[rs1] & imm
         elif func3 == Func3.SLLI:
             regfile[rd] = regfile[rs1] << imm
         elif func3 == Func3.SRLI:
@@ -202,31 +213,76 @@ def step() -> bool:
         if func3 == Func3.ADD:
             regfile[rd] = regfile[rs1] + regfile[rs2]
 
+    elif opcode == Ops.LUI:
+        # U-type
+        # Pretty sure this is wrong. We need to fill lower 12 with zeros,
+        # and gibi 31, 12
+        rd = gibi(11, 7)
+        uimm = gibi(31, 20)
+        regfile[rd] = uimm << 12
+
     elif opcode == Ops.AUIPC:
-        # J-type
+        # U-type
         rd = gibi(11, 7)
         uimm = gibi(31, 20)
         regfile[rd] = regfile[PC] + uimm
 
     elif opcode == Ops.BRANCH:
         # B-type
-        func3 = Func3(gibi(14, 12))
+        func3: Func3 = Func3(gibi(14, 12))
         rs1 = gibi(19, 15)
         rs2 = gibi(24, 20)
         imm = sign_extend(
             gibi(11, 8) << 1
-            | gibi(30, 25) << 6
+            | gibi(30, 25) << 5
             | gibi(7, 7) << 11
             | gibi(31, 31) << 12,
             12,
         )
+        offset = sign_extend(regfile[rs2], 12) << 1
 
-        print(func3)
-        if func3 == Func3.BNE:
-            if regfile[rs1] != sign_extend(regfile[rs2], 12) << 1:
-                regfile[PC] += imm
-            else:
-                regfile[PC] += 4
+        cond = False
+        if func3 == Func3.BEQ:
+            cond = regfile[rs1] == offset
+
+        elif func3 == Func3.BNE:
+            cond = regfile[rs1] != offset
+
+        else:
+            dump()
+            raise Exception("write %r func3 %r" % (opcode, func3))
+        if cond:
+            regfile[PC] += imm
+            return True
+
+    elif opcode == Ops.STORE:
+        # S-type
+        func3 = Func3(gibi(14, 12))
+        rd = gibi(11, 7)
+        rs1 = gibi(19, 15)
+
+        # Stores 32 bit values from rs2 to mem
+        imm = sign_extend(gibi(11, 7) | gibi(31, 25) << 5, 12)
+        rs2 = gibi(24, 20)
+        data = regfile[rs2]
+        addr = regfile[rs1] + imm
+        print("STORE %8x = %x" % (addr, data))
+        # I guess skip writing for now? Too complex?
+        # ws(data, addr)
+
+        # else:
+        #     dump()
+        #     raise Exception("write %r func3 %r" % (opcode, func3))
+
+    elif opcode == Ops.LOAD:
+        # I-type
+        rd = gibi(11, 7)
+        width = gibi(14, 12)
+        rs1 = gibi(19, 15)
+        imm = sign_extend(gibi(31, 20), 12)
+        addr = regfile[rs1] + imm
+        val = r32(addr)
+        print("LOAD %8x = %x" % (addr, val))
 
     elif opcode == Ops.SYSTEM:
         pass
