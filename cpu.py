@@ -14,11 +14,22 @@ import glob
 from elftools.elf.elffile import ELFFile
 from enum import Enum
 
+# Better register names according to the RISC-V spec page 137
+regs = (
+    ["x0", "ra", "sp", "gp", "tp"]
+    + ["t%d" % i for i in range(3)]
+    + ["s0", "s1"]
+    + ["a%d" % i for i in range(0, 8)]
+    + ["s%d" % i for i in range(2, 12)]
+    + ["t%d" % i for i in range(3, 7)]
+    + ["PC"]
+)
+
 
 # Our set of registers.
 class Regfile:
     def __init__(self):
-        self.regs = [0] * 33
+        self.regs = [0] * 34
 
     def __getitem__(self, x):
         return self.regs[x]
@@ -34,6 +45,10 @@ class Regfile:
 regfile = Regfile()
 # register file, as in, keeps track of all register values
 PC = 32
+# Machine trap vector, something to handle a weird runtime state like divide by zero, printing, etc
+MTVEC = 33
+# reg a7 specified system call type
+# reg a0 specified value passed to system call
 
 
 class Ops(Enum):
@@ -78,6 +93,13 @@ class Func3(Enum):
     SB = 0b000
     SH = 0b001
     SW = 0b010
+
+    CSRRW = 0b001
+    CSRRS = 0b010
+    CSRRC = 0b011
+    CSRRWI = 0b101
+    CSRRSI = 0b110
+    CSRRCI = 0b111
 
     # SYSTEM
     # I-type
@@ -148,6 +170,7 @@ def step() -> bool:
     # print("%x %8x " % (regfile[PC], ins))
     opcode = Ops(bits)
     print("%x %8x %r" % (regfile[PC], ins, opcode))
+    # dump()
     # print(hex(offset), rd)
     if opcode == Ops.JAL:
         # J-Type
@@ -193,7 +216,7 @@ def step() -> bool:
         if func3 == Func3.ADDI:
             regfile[rd] = regfile[rs1] + imm
         elif func3 == Func3.ORI:
-            regfile[rd] = regfile[rs1] & imm
+            regfile[rd] = regfile[rs1] | imm
         elif func3 == Func3.SLLI:
             regfile[rd] = regfile[rs1] << imm
         elif func3 == Func3.SRLI:
@@ -218,7 +241,7 @@ def step() -> bool:
         # Pretty sure this is wrong. We need to fill lower 12 with zeros,
         # and gibi 31, 12
         rd = gibi(11, 7)
-        uimm = gibi(31, 20)
+        uimm = gibi(31, 12)
         regfile[rd] = uimm << 12
 
     elif opcode == Ops.AUIPC:
@@ -243,10 +266,16 @@ def step() -> bool:
 
         cond = False
         if func3 == Func3.BEQ:
-            cond = regfile[rs1] == offset
+            cond = regfile[rs1] == regfile[rs2]
 
         elif func3 == Func3.BNE:
-            cond = regfile[rs1] != offset
+            cond = regfile[rs1] != regfile[rs2]
+
+        elif func3 == Func3.BLT:
+            cond = regfile[rs1] < regfile[rs2]
+
+        elif func3 == Func3.BGE:
+            cond = regfile[rs1] >= regfile[rs2]
 
         else:
             dump()
@@ -284,8 +313,35 @@ def step() -> bool:
         val = r32(addr)
         print("LOAD %8x = %x" % (addr, val))
 
-    elif opcode == Ops.SYSTEM:
+    elif opcode == Ops.MISC:
         pass
+
+    elif opcode == Ops.SYSTEM:
+        rd = gibi(11, 7)
+        func3 = Func3(gibi(14, 12))
+        rs1 = gibi(19, 15)
+        csr = gibi(31, 20)
+        if func3 == Func3.CSRRS:
+            print("CSRRS", rd, rs1, hex(csr))
+        elif func3 == Func3.CSRRW:
+            if csr == 3072:
+                return False
+            print("CSRRW", rd, rs1, hex(csr))
+        elif func3 == Func3.CSRRWI:
+            print("CSRRWI", rd, rs1, hex(csr))
+        elif func3 == Func3.ECALL:
+            print("ECALL", rd, rs1, hex(csr))
+            if regfile[17] == 93:
+                if regfile[10] != 0:
+                    raise Exception("Test %d failed!" % ((regfile[10] - 1) / 2))
+                elif regfile[10] == 0:
+                    print("Tests passed!")
+                else:
+                    print("Returned with %r" % regfile[10])
+
+        else:
+            dump()
+            raise Exception("func %r" % func3)
 
     else:
         dump()
@@ -302,12 +358,12 @@ def step() -> bool:
 
 
 if __name__ == "__main__":
-    for x in glob.glob("riscv-tests/isa/rv32ui-*"):
+    for x in glob.glob("riscv-tests/isa/rv32ui-p-*"):
         # .dump files here are the disassemblys of the tests
         if x.endswith(".dump"):
             continue
         # open file and r(ead) as b(inary)
-        if x != "riscv-tests/isa/rv32ui-v-add":
+        if x != "riscv-tests/isa/rv32ui-p-add":
             continue
         else:
             with open(x, "rb") as f:
